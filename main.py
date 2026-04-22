@@ -48,8 +48,13 @@ def get_recent_memory(user_id, limit=10):
         cursor.execute("SELECT role, content FROM chat_history WHERE user_id=? ORDER BY timestamp DESC LIMIT ?", (user_id, limit))
         rows = cursor.fetchall()
         conn.close()
+        
+        # লগ দেখার জন্য এটি যোগ করুন
+        print(f"Memory Loaded: {len(rows)} messages found for user {user_id}")
+        
         return list(reversed(rows))
-    except:
+    except Exception as e:
+        print(f"Memory Load Error: {e}")
         return []
 
 def get_maya_rules(user_id):
