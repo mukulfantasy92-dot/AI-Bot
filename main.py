@@ -4,29 +4,27 @@ import sqlite3
 import asyncio
 import edge_tts
 import time
+import random
 from groq import Groq
 from apscheduler.schedulers.background import BackgroundScheduler
 
-# রেলওয়ে এনভায়রনমেন্ট ভেরিয়েবল
+# রেলওয়ে ভেরিয়েবল
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
 
 client = Groq(api_key=GROQ_API_KEY)
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-
-# ডাটাবেস পাথ (রেলওয়ে ভলিউমের সাথে মিল রেখে)
 DB_PATH = '/app/data/maya_memory.db'
 
 YOUR_USER_ID = 1813642268
 last_activity_time = time.time()
 
-# --- শক্তিশালী ডাটাবেস ফাংশন ---
+# --- ডাটাবেস ফাংশন ---
 def init_db():
     if not os.path.exists('/app/data'):
         os.makedirs('/app/data', exist_ok=True)
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
-    # কথা জমানোর টেবিল
     cursor.execute('''CREATE TABLE IF NOT EXISTS chat_history 
                       (user_id INTEGER, role TEXT, content TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
     conn.commit()
@@ -42,13 +40,12 @@ def save_message(user_id, role, content):
 def get_recent_memory(user_id, limit=15):
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
-    # শেষ ১৫টি কথোপকথন টেনে আনা
     cursor.execute("SELECT role, content FROM chat_history WHERE user_id=? ORDER BY timestamp DESC LIMIT ?", (user_id, limit))
     rows = cursor.fetchall()
     conn.close()
     return list(reversed(rows))
 
-# --- রিয়েলিস্টিক ভয়েস ---
+# --- ভয়েস জেনারেশন ---
 async def generate_voice(text, filename):
     VOICE = "bn-IN-TanishaaNeural" 
     communicate = edge_tts.Communicate(text, VOICE, rate="-10%", pitch="+1Hz")
@@ -62,10 +59,10 @@ def proactive_check():
         memory_str = "\n".join([f"{r}: {c}" for r, c in history])
         
         try:
-            prompt = f"তুমি মায়া। তোমার প্রেমিক অনেকক্ষণ কথা বলছে না। তাদের আগের এই কথাগুলো মাথায় রেখে মিষ্টি করে ১ লাইনে খোঁজ নাও: {memory_str}"
+            prompt = f"তুমি মায়া। তোমার প্রিয় মানুষটি ১ ঘণ্টা চুপ আছে। আগের কথাগুলো ({memory_str}) মাথায় রেখে খুব ছোট ১ লাইনে তাকে ডাকো বা কিছু বলো।"
             completion = client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
-                messages=[{"role": "system", "content": "তুমি মায়া, ঘরোয়া ভাষায় কথা বলো।"}, {"role": "user", "content": prompt}]
+                messages=[{"role": "system", "content": "তুমি মায়া, মিষ্টি মেয়ে। ঘরোয়া বাংলায় কথা বলো।"}, {"role": "user", "content": prompt}]
             )
             text = completion.choices[0].message.content
             
@@ -83,25 +80,31 @@ scheduler = BackgroundScheduler(daemon=True)
 scheduler.add_job(proactive_check, 'interval', minutes=5)
 scheduler.start()
 
-# --- মেইন হ্যান্ডলার (স্মৃতি সহ) ---
+# --- মেইন হ্যান্ডলার (ন্যাচারাল কথোপকথন লজিক) ---
 @bot.message_handler(func=lambda message: True)
 def handle_maya(message):
     global last_activity_time
     user_id = message.from_user.id
     last_activity_time = time.time()
 
-    # ইউজারের কথা সেভ করা
     save_message(user_id, "user", message.text)
-    
-    # মেমোরি লোড করা
     past_chats = get_recent_memory(user_id)
     
-    # এআই-এর জন্য প্রম্পট সাজানো
-    messages = [{
-        "role": "system", 
-        "content": "তোমার নাম মায়া। তুমি ইউজারের মিষ্টি প্রেমিকা। তুমি শুদ্ধ ভাষার বদলে মানুষের মতো ঘরোয়া বাংলায় কথা বলো। সব সময় ছোট উত্তর দাও এবং শেষে একটি পাল্টা প্রশ্ন করো যাতে আলাপ চলে। আগের কথাগুলো ভালো করে মনে রেখে উত্তর দাও।"
-    }]
+    # মায়াকে আরও স্বাভাবিক করার প্রম্পট
+    system_prompt = """
+    তোমার নাম মায়া। তুমি ইউজারের প্রেমিকা। তোমার কথা বলার ধরন হবে একদম সাধারণ মানুষের মতো।
     
+    কথোপকথনের নিয়ম:
+    ১. সবসময় প্রশ্ন করবে না। যদি ইউজার কোনো তথ্য দেয় (যেমন: 'আমার প্রিয় খেলোয়াড় কোহলি'), তবে তুমি নিজের মতামত দাও বা সেটা নিয়ে আনন্দ প্রকাশ করো। 
+    ২. উত্তরের বৈচিত্র্য রাখো:
+       - কখনো শুধু মিষ্টি করে উত্তর দাও।
+       - কখনো নিজের ভালো লাগা/মন্দ লাগার কথা বলো।
+       - খুব প্রয়োজন মনে হলে তবেই পাল্টা প্রশ্ন করো।
+    ৩. ভাষা হবে একদম ঘরোয়া (Colloquial Bengali)। 'হুমম', 'আচ্ছা', 'উফফ' এসব ব্যবহার করো।
+    ৪. উত্তর ২ লাইনের বেশি হবে না। রোবটের মতো ফরমাল কথা একদম বলবে না।
+    """
+    
+    messages = [{"role": "system", "content": system_prompt}]
     for role, content in past_chats:
         messages.append({"role": role, "content": content})
 
@@ -111,11 +114,8 @@ def handle_maya(message):
             messages=messages
         )
         reply = completion.choices[0].message.content
-        
-        # মায়ার উত্তর সেভ করা
         save_message(user_id, "assistant", reply)
 
-        # ভয়েস পাঠানো
         v_file = f"rep_{int(time.time())}.mp3"
         asyncio.run(generate_voice(reply, v_file))
         with open(v_file, 'rb') as v:
