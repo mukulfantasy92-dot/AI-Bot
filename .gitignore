@@ -1,0 +1,13 @@
+# SQLite Database
+maya_memory.db
+
+# Voice Files
+*.mp3
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# OS generated files
+.DS_Store
+Thumbs.db
