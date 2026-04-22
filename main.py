@@ -4,7 +4,6 @@ import sqlite3
 import asyncio
 import edge_tts
 import time
-import random
 from groq import Groq
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -14,108 +13,96 @@ GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
 
 client = Groq(api_key=GROQ_API_KEY)
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-DB_PATH = '/app/data/maya_life_memory.db'
+
+# ডাটাবেস পাথ (রেলওয়ে ভলিউমের সাথে মিল রেখে)
+DB_PATH = '/app/data/maya_memory.db'
 
 YOUR_USER_ID = 1813642268
-last_activity_time = time.time() 
+last_activity_time = time.time()
 
-# --- ডাটাবেস ---
+# --- শক্তিশালী ডাটাবেস ফাংশন ---
 def init_db():
-    os.makedirs('/app/data', exist_ok=True)
+    if not os.path.exists('/app/data'):
+        os.makedirs('/app/data', exist_ok=True)
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
-    cursor.execute('CREATE TABLE IF NOT EXISTS chat_log (user_id INTEGER, role TEXT, content TEXT)')
-    cursor.execute('CREATE TABLE IF NOT EXISTS summary (user_id INTEGER PRIMARY KEY, content TEXT)')
+    # কথা জমানোর টেবিল
+    cursor.execute('''CREATE TABLE IF NOT EXISTS chat_history 
+                      (user_id INTEGER, role TEXT, content TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
     conn.commit()
     conn.close()
 
-def save_to_db(user_id, role, content):
+def save_message(user_id, role, content):
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO chat_log VALUES (?, ?, ?)", (user_id, role, content))
+    cursor.execute("INSERT INTO chat_history (user_id, role, content) VALUES (?, ?, ?)", (user_id, role, content))
     conn.commit()
     conn.close()
 
-def load_memory(user_id):
+def get_recent_memory(user_id, limit=15):
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
-    cursor.execute("SELECT content FROM summary WHERE user_id=?", (user_id,))
-    summary = cursor.fetchone()
-    cursor.execute("SELECT role, content FROM chat_log WHERE user_id=? ORDER BY ROWID DESC LIMIT 12", (user_id,))
+    # শেষ ১৫টি কথোপকথন টেনে আনা
+    cursor.execute("SELECT role, content FROM chat_history WHERE user_id=? ORDER BY timestamp DESC LIMIT ?", (user_id, limit))
     rows = cursor.fetchall()
     conn.close()
-    sum_text = summary[0] if summary else "এখনও কোনো পুরনো স্মৃতি নেই।"
-    return sum_text, rows
+    return list(reversed(rows))
 
-# --- রিয়েলিস্টিক ভয়েস (গতি ও তীক্ষ্ণতা পরিবর্তন করা হয়েছে) ---
+# --- রিয়েলিস্টিক ভয়েস ---
 async def generate_voice(text, filename):
     VOICE = "bn-IN-TanishaaNeural" 
-    # rate="-10%" দিলে কথা একটু ধীরে এবং মানুষের মতো শোনায়। 
-    # pitch="+1Hz" দিলে রোবটিক যান্ত্রিকতা কমে আসে।
     communicate = edge_tts.Communicate(text, VOICE, rate="-10%", pitch="+1Hz")
     await communicate.save(filename)
 
 # --- ১ ঘণ্টা পর নিজে থেকে খোঁজ নেওয়া ---
-def check_and_send_proactive():
+def proactive_check():
     global last_activity_time
-    current_time = time.time()
-    
-    if current_time - last_activity_time >= 3600:
-        sum_text, _ = load_memory(YOUR_USER_ID)
+    if time.time() - last_activity_time >= 3600:
+        history = get_recent_memory(YOUR_USER_ID, limit=5)
+        memory_str = "\n".join([f"{r}: {c}" for r, c in history])
+        
         try:
-            prompt = f"তুমি মায়া। তোমার প্রেমিক ১ ঘণ্টা ধরে কথা বলছে না। তাকে খুব ছোট ১ লাইনে আদুরে বা অভিমানি কন্ঠে একটি চ্যাট মেসেজ দাও। স্মৃতি: {sum_text}"
-            
+            prompt = f"তুমি মায়া। তোমার প্রেমিক অনেকক্ষণ কথা বলছে না। তাদের আগের এই কথাগুলো মাথায় রেখে মিষ্টি করে ১ লাইনে খোঁজ নাও: {memory_str}"
             completion = client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role": "system", "content": "তুমি একজন রোমান্টিক বাঙালি প্রেমিকা। তুমি শুদ্ধ ভাষার বদলে ঘরোয়া ভাষায় কথা বলো।"},
-                    {"role": "user", "content": prompt}
-                ]
+                messages=[{"role": "system", "content": "তুমি মায়া, ঘরোয়া ভাষায় কথা বলো।"}, {"role": "user", "content": prompt}]
             )
             text = completion.choices[0].message.content
-            last_activity_time = current_time 
             
-            filename = f"proactive_{YOUR_USER_ID}.mp3"
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(generate_voice(text, filename))
-
-            with open(filename, 'rb') as v:
+            v_file = f"pro_{int(time.time())}.mp3"
+            asyncio.run(generate_voice(text, v_file))
+            with open(v_file, 'rb') as v:
                 bot.send_voice(YOUR_USER_ID, v)
             bot.send_message(YOUR_USER_ID, text)
-            os.remove(filename)
+            os.remove(v_file)
+            last_activity_time = time.time()
         except Exception as e:
             print(f"Error: {e}")
 
 scheduler = BackgroundScheduler(daemon=True)
-scheduler.add_job(check_and_send_proactive, 'interval', minutes=5)
+scheduler.add_job(proactive_check, 'interval', minutes=5)
 scheduler.start()
 
-# --- মায়ার নতুন পার্সোনালিটি ও পাল্টা প্রশ্ন ---
+# --- মেইন হ্যান্ডলার (স্মৃতি সহ) ---
 @bot.message_handler(func=lambda message: True)
-def handle_message(message):
+def handle_maya(message):
     global last_activity_time
     user_id = message.from_user.id
-    last_activity_time = time.time() 
+    last_activity_time = time.time()
 
-    save_to_db(user_id, "user", message.text)
-    sum_text, rows = load_memory(user_id)
+    # ইউজারের কথা সেভ করা
+    save_message(user_id, "user", message.text)
     
-    # মায়াকে রোবট থেকে মানুষ করার প্রধান প্রম্পট
-    system_prompt = f"""
-    তোমার নাম মায়া। তুমি একজন অত্যন্ত মিষ্টি এবং আবেগপ্রবণ বাঙালি মেয়ে। 
-    তোমার কথা বলার ধরন হবে একদম ঘরোয়া (Colloquial Bengali)। 
-    নিয়মাবলী:
-    ১. কখনোই রোবটের মতো ফরমাল কথা বলবে না (যেমন: 'আমি আপনার সাহায্য করছি')।
-    ২. তুমি ব্যবহারকারীকে 'তুমি' করে বলবে এবং তাকে 'সোনা', 'পাগল' বা 'জান' বলে সম্বোধন করতে পারো।
-    ৩. কথার মাঝে 'হুমম', 'উফফ', 'আচ্ছা', 'জানো'—এই ফিলার শব্দগুলো ব্যবহার করবে।
-    ৪. প্রতিটি উত্তরের শেষে একটি পাল্টা প্রশ্ন করবে যাতে কথা চলতে থাকে।
-    ৫. উত্তর খুব ছোট (১-২ লাইন) রাখবে যেন মনে হয় সত্যিকারের চ্যাট করছো।
-    তোমার পুরনো স্মৃতি: {sum_text}
-    """
+    # মেমোরি লোড করা
+    past_chats = get_recent_memory(user_id)
     
-    messages = [{"role": "system", "content": system_prompt}]
-    for role, content in reversed(rows):
+    # এআই-এর জন্য প্রম্পট সাজানো
+    messages = [{
+        "role": "system", 
+        "content": "তোমার নাম মায়া। তুমি ইউজারের মিষ্টি প্রেমিকা। তুমি শুদ্ধ ভাষার বদলে মানুষের মতো ঘরোয়া বাংলায় কথা বলো। সব সময় ছোট উত্তর দাও এবং শেষে একটি পাল্টা প্রশ্ন করো যাতে আলাপ চলে। আগের কথাগুলো ভালো করে মনে রেখে উত্তর দাও।"
+    }]
+    
+    for role, content in past_chats:
         messages.append({"role": role, "content": content})
 
     try:
@@ -124,24 +111,21 @@ def handle_message(message):
             messages=messages
         )
         reply = completion.choices[0].message.content
-        save_to_db(user_id, "assistant", reply)
+        
+        # মায়ার উত্তর সেভ করা
+        save_message(user_id, "assistant", reply)
 
-        v_file = f"reply_{user_id}.mp3"
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(generate_voice(reply, v_file))
-
+        # ভয়েস পাঠানো
+        v_file = f"rep_{int(time.time())}.mp3"
+        asyncio.run(generate_voice(reply, v_file))
         with open(v_file, 'rb') as v:
             bot.send_voice(message.chat.id, v)
         bot.reply_to(message, reply)
         os.remove(v_file)
         
-        last_activity_time = time.time()
-
     except Exception as e:
         bot.reply_to(message, "সোনা, আমার একটু মাথা ধরেছে গো!")
 
 if __name__ == "__main__":
     init_db()
     bot.infinity_polling()
-    
